@@ -1,0 +1,120 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#17140F">
+<title>Send to TV</title>
+<style>
+:root{--bg:#17140F;--surface:#211C14;--surface2:#2B2419;--outline:#3A3122;--text:#F6EFE2;--muted:#A39982;--primary:#F7A600;--onprimary:#2A1C00;--danger:#F0745F}
+@media (prefers-color-scheme:light){:root{--bg:#FBF6EA;--surface:#fff;--surface2:#F4ECD9;--outline:#E6DAC0;--text:#231C0F;--muted:#7D705A;--danger:#C8402F}}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+html,body{margin:0;min-height:100%;background:var(--bg);color:var(--text);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+main{max-width:520px;margin:0 auto;padding:max(20px,env(safe-area-inset-top)) 16px 40px;display:grid;gap:14px}
+.logo{width:56px;height:56px;border-radius:18px;background:var(--primary);display:grid;place-items:center}
+h1{margin:6px 0 0;font-size:26px}p{margin:0;color:var(--muted)}
+.card{background:var(--surface);border:1px solid var(--outline);border-radius:20px;padding:16px;display:grid;gap:12px}
+.status{display:flex;align-items:center;gap:10px;font-weight:600}
+.dot{width:12px;height:12px;border-radius:6px;background:var(--muted)}.dot.on{background:#46C28A}.dot.err{background:var(--danger)}
+label{font-size:13px;color:var(--muted);display:grid;gap:6px}
+input[type=text]{width:100%;min-height:48px;border-radius:14px;border:1px solid var(--outline);background:var(--surface2);color:var(--text);font:inherit;padding:0 14px}
+input[type=text]:focus{outline:2px solid var(--primary);border-color:transparent}
+.btn{min-height:52px;border-radius:26px;border:0;background:var(--primary);color:var(--onprimary);font:inherit;font-weight:700;padding:0 20px;cursor:pointer;width:100%}
+.btn.alt{background:var(--surface2);color:var(--text);border:1px solid var(--outline)}
+.btn:disabled{opacity:.5}
+ul{list-style:none;margin:0;padding:0;display:grid;gap:8px}
+li{background:var(--surface2);border-radius:14px;padding:10px 14px;display:flex;justify-content:space-between;gap:10px}
+li b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}li span{color:var(--muted);white-space:nowrap}
+.note{font-size:13px}
+</style>
+</head>
+<body>
+<main>
+  <div class="logo" aria-hidden="true"><svg width="30" height="30" viewBox="0 0 24 24" fill="#2A1C00"><path d="M12 2C8.1 2 5 5.1 5 9c0 5.2 7 13 7 13s7-7.8 7-13c0-3.9-3.1-7-7-7zm0 9.5A2.5 2.5 0 1 1 12 6.5a2.5 2.5 0 0 1 0 5z"/></svg></div>
+  <h1>Send to TV</h1>
+  <p>Pick videos, photos or music. Your TV plays them straight from this phone. Nothing is uploaded or saved on the TV.</p>
+
+  <div class="card">
+    <div class="status"><span class="dot" id="dot"></span><span id="st">Connecting to the TV…</span></div>
+    <label>Your name on the TV<input type="text" id="dev" maxlength="24" autocomplete="off"></label>
+  </div>
+
+  <div class="card">
+    <label>Folder name on the TV<input type="text" id="batch" maxlength="60" value="My files" autocomplete="off"></label>
+    <button class="btn" id="addFiles" disabled>Choose videos, photos or music</button>
+    <button class="btn alt" id="addFolder" disabled>Choose a whole folder</button>
+    <p class="note">Tip: change the folder name and choose again to share several folders.</p>
+    <input type="file" id="pickFiles" multiple accept="video/*,image/*,audio/*" hidden>
+    <input type="file" id="pickFolder" multiple webkitdirectory hidden>
+  </div>
+
+  <div class="card" id="listCard" hidden>
+    <b>Shared with the TV</b>
+    <ul id="list"></ul>
+    <p class="note">Keep this page open while you watch. Closing it stops the sharing.</p>
+    <button class="btn alt" id="stop">Stop sharing</button>
+  </div>
+</main>
+<script>
+"use strict";
+const $=s=>document.querySelector(s);
+const token=new URLSearchParams(location.search).get("t")||"";
+const ua=navigator.userAgent;
+const guess=/iPhone/.test(ua)?"iPhone":/iPad/.test(ua)?"iPad":/Android/.test(ua)?"Android phone":"My device";
+const saved=(()=>{try{return localStorage.getItem("ls_tvname")}catch(e){return null}})();
+$("#dev").value=saved||guess;
+const files=new Map();let nextId=1,ws=null,wake=null,opened=false;
+const fmt=n=>n<1048576?Math.max(1,Math.round(n/1024))+" KB":n<1073741824?(n/1048576).toFixed(1)+" MB":(n/1073741824).toFixed(2)+" GB";
+function status(t,cls){$("#st").textContent=t;$("#dot").className="dot "+(cls||"")}
+function connect(){
+  ws=new WebSocket("ws://"+location.host+"/ws?t="+encodeURIComponent(token)+"&n="+encodeURIComponent($("#dev").value));
+  ws.binaryType="arraybuffer";
+  ws.onopen=()=>{opened=true;status("Connected to your TV","on");$("#addFiles").disabled=false;$("#addFolder").disabled=false;requestWake()};
+  ws.onclose=()=>{status(opened?"Disconnected. Reload this page to connect again.":"Could not reach the TV. Is it on the same Wi-Fi?","err");$("#addFiles").disabled=true;$("#addFolder").disabled=true};
+  ws.onmessage=async e=>{
+    if(typeof e.data!=="string")return;
+    const p=e.data.split("\t");if(p[0]!=="get")return;
+    const rid=+p[1],f=files.get(+p[2]),start=+p[3],len=+p[4];
+    let out;
+    try{
+      if(!f)throw new Error("gone");
+      const buf=await f.slice(start,start+len).arrayBuffer();
+      out=new Uint8Array(5+buf.byteLength);out.set(new Uint8Array(buf),5);
+    }catch(x){out=new Uint8Array(5);out[4]=1}
+    new DataView(out.buffer).setUint32(0,rid);
+    if(ws.readyState===1)ws.send(out);
+  };
+}
+async function requestWake(){try{if(navigator.wakeLock)wake=await navigator.wakeLock.request("screen")}catch(e){}}
+document.addEventListener("visibilitychange",()=>{if(!document.hidden&&ws&&ws.readyState===1)requestWake()});
+function send(list,batchName,fromFolder){
+  if(!list.length||!ws||ws.readyState!==1)return;
+  const groups=new Map();
+  for(const f of list){
+    let b=batchName,name=f.name;
+    if(fromFolder&&f.webkitRelativePath){const parts=f.webkitRelativePath.split("/");b=parts[0]||batchName;name=parts.slice(1).join(" / ")||f.name}
+    if(!groups.has(b))groups.set(b,[]);groups.get(b).push([f,name]);
+  }
+  for(const [b,arr] of groups){
+    for(const [f,name] of arr){
+      const id=nextId++;files.set(id,f);
+      ws.send(["add",b,id,f.size,f.type||"",name].join("\t"));
+    }
+    ws.send("end\t"+b);
+    const li=document.createElement("li");li.innerHTML="<b></b><span></span>";
+    li.firstChild.textContent=b;li.lastChild.textContent=arr.length+(arr.length===1?" file":" files");
+    $("#list").appendChild(li);
+  }
+  $("#listCard").hidden=false;
+  status("Sharing "+files.size+(files.size===1?" file":" files")+" with your TV","on");
+}
+$("#addFiles").onclick=()=>$("#pickFiles").click();
+$("#addFolder").onclick=()=>$("#pickFolder").click();
+$("#pickFiles").onchange=e=>{send([...e.target.files],$("#batch").value.trim()||"My files",false);e.target.value=""};
+$("#pickFolder").onchange=e=>{send([...e.target.files],$("#batch").value.trim()||"My files",true);e.target.value=""};
+$("#dev").onchange=()=>{try{localStorage.setItem("ls_tvname",$("#dev").value)}catch(e){}};
+$("#stop").onclick=()=>{if(ws)ws.close();if(wake)try{wake.release()}catch(e){}};
+connect();
+</script>
+</body>
+</html>
